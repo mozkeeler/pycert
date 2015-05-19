@@ -141,8 +141,41 @@ class Certificate:
         value = ":".join(line.split(":")[1:])
         if param == "subject":
             self.subject = value
-        if param == "issuer":
+        elif param == "issuer":
             self.issuer = value
+        elif param == "extension":
+            self.decodeExtension(value)
+        else:
+            raise Exception("unknown parameter type '%s'" % param)
+
+    def decodeExtension(self, extension):
+        extensionType = extension.split(":")[0]
+        value = ":".join(extension.split(":")[1:])
+        if extensionType == "basicConstraints":
+            self.addBasicConstraints(value)
+        else:
+            raise Exception("unknown extension type '%s'" % extensionType)
+
+    def addExtension(self, extensionType, extensionValue):
+        if not self.extensions:
+            self.extensions = []
+        encapsulated = univ.OctetString(encoder.encode(extensionValue))
+        extension = rfc2459.Extension()
+        extension.setComponentByName('extnID', extensionType)
+        extension.setComponentByName('extnValue', encapsulated)
+        self.extensions.append(extension)
+
+    def addBasicConstraints(self, basicConstraints):
+        cA = basicConstraints.split(",")[0]
+        pathLenConstraint = basicConstraints.split(",")[1]
+        basicConstraintsExtension = rfc2459.BasicConstraints()
+        if cA == "cA":
+            basicConstraintsExtension.setComponentByName('cA', univ.Boolean(True))
+        if pathLenConstraint:
+            pathLenConstraintValue = univ.Integer().subtype(subtypeSpec=constraint.ValueRangeConstraint(0, MAX))
+            pathLenConstraintValue.setComponentByPosition(0, int(pathLenConstraint))
+            basicConstraintsExtension.setComponentByName('pathLenConstraint', pathLenConstraintValue)
+        self.addExtension(rfc2459.id_ce_basicConstraints, basicConstraintsExtension)
 
     def getVersion(self):
         return rfc2459.Version(self.version).subtype(explicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatSimple, 0))
@@ -197,6 +230,13 @@ class Certificate:
         tbsCertificate.setComponentByName('validity', self.getValidity())
         tbsCertificate.setComponentByName('subject', self.getSubject())
         tbsCertificate.setComponentByName('subjectPublicKeyInfo', self.getSubjectPublicKeyInfo())
+        if self.extensions:
+            extensions = rfc2459.Extensions().subtype(explicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatSimple, 3))
+            count = 0
+            for extension in self.extensions:
+                extensions.setComponentByPosition(count, extension)
+                count += 1
+            tbsCertificate.setComponentByName('extensions', extensions)
         tbsDER = encoder.encode(tbsCertificate)
         rsaKey = RSA.construct((self.sharedRSA_N, self.sharedRSA_E, self.sharedRSA_D))
         h = SHA256.new(tbsDER)
