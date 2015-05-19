@@ -179,6 +179,10 @@ class Certificate:
         value = ":".join(extension.split(":")[1:])
         if extensionType == "basicConstraints":
             self.addBasicConstraints(value)
+        elif extensionType == "keyUsage":
+            self.addKeyUsage(value)
+        elif extensionType == "extKeyUsage":
+            self.addExtKeyUsage(value)
         else:
             raise Exception("unknown extension type '%s'" % extensionType)
 
@@ -204,6 +208,26 @@ class Certificate:
             basicConstraintsExtension.setComponentByName('pathLenConstraint',
                                                          pathLenConstraintValue)
         self.addExtension(rfc2459.id_ce_basicConstraints, basicConstraintsExtension)
+
+    def addKeyUsage(self, keyUsage):
+        keyUsageExtension = rfc2459.KeyUsage(keyUsage)
+        self.addExtension(rfc2459.id_ce_keyUsage, keyUsageExtension)
+
+    def keyPurposeToOID(self, keyPurpose):
+        if keyPurpose == "serverAuth":
+            # the OID for id_kp_serverAuth is incorrect in the pyasn1-modules implementation
+            return univ.ObjectIdentifier('1.3.6.1.5.5.7.3.1')
+        if keyPurpose == "clientAuth":
+            return rfc2459.id_kp_clientAuth
+        raise Exception("unknown key purpose '%s'" % keyPurpose)
+
+    def addExtKeyUsage(self, extKeyUsage):
+        extKeyUsageExtension = rfc2459.ExtKeyUsageSyntax()
+        count = 0
+        for keyPurpose in extKeyUsage.split(","):
+            extKeyUsageExtension.setComponentByPosition(count, self.keyPurposeToOID(keyPurpose))
+            count += 1
+        self.addExtension(rfc2459.id_ce_extKeyUsage, extKeyUsageExtension)
 
     def getVersion(self):
         return rfc2459.Version(self.version).subtype(
