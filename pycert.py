@@ -35,7 +35,7 @@ from Crypto.PublicKey import RSA
 from Crypto.Signature import PKCS1_v1_5
 from pyasn1.codec.der import decoder
 from pyasn1.codec.der import encoder
-from pyasn1.type import namedtype, tag, univ, useful
+from pyasn1.type import constraint, namedtype, tag, univ, useful
 from pyasn1_modules import rfc2459
 import base64
 import datetime
@@ -199,12 +199,11 @@ class Certificate:
         cA = basicConstraints.split(",")[0]
         pathLenConstraint = basicConstraints.split(",")[1]
         basicConstraintsExtension = rfc2459.BasicConstraints()
-        if cA == "cA":
-            basicConstraintsExtension.setComponentByName('cA', True)
+        basicConstraintsExtension.setComponentByName('cA', cA == "cA")
         if pathLenConstraint:
             pathLenConstraintValue = \
-                univ.Integer().subtype(subtypeSpec=constraint.ValueRangeConstraint(0, MAX))
-            pathLenConstraintValue.setComponentByPosition(0, int(pathLenConstraint))
+                univ.Integer(int(pathLenConstraint)).subtype(
+                    subtypeSpec=constraint.ValueRangeConstraint(0, 64))
             basicConstraintsExtension.setComponentByName('pathLenConstraint',
                                                          pathLenConstraintValue)
         self.addExtension(rfc2459.id_ce_basicConstraints, basicConstraintsExtension)
