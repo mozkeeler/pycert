@@ -3,31 +3,27 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 """
-Reads a certificate specification from stdin and outputs a signed
-x509 certificate with the desired properties.
+Reads a certificate specification from stdin or a file and outputs a
+signed x509 certificate with the desired properties.
 
 The input format is as follows:
 
-version:<v1|v2|v3>
-signature:<(sha256|sha1|md5|md2)WithRSAEncryption>
-issuer:<stringified DN of the form /C=XX/O=Example Organization/CN=...>
-notBefore:<string describing time relative to now>
-notAfter:<string describing time relative to now>
-subject:<stringified DN of the form /C=XX/O=Example Organization/CN=...>
-subjectPublicKey:<string describing spki>
-issuerPublicKey:<string describing spki>
-signatureAlgorithm:<(sha256|sha1|md5|md2)WithRSAEncryption>
+issuer:<string to use as the issuer common name>
+subject:<string to use as the subject common name>
 [extension:<extension name:<extension-specific data>>]
 [...]
 
 Known extensions are:
 basicConstraints:[cA],[pathLenConstraint]
-keyUsage:[digitalSignature,nonRepudiation,keyEncipherment,dataEncipherment,
-          keyAgreement,keyCertSign,cRLSign]
+keyUsage:[digitalSignature,nonRepudiation,keyEncipherment,
+          dataEncipherment,keyAgreement,keyCertSign,cRLSign]
 extKeyUsage:[serverAuth,clientAuth]
 
-Most fields have a default value. The only required fields are issuer and
-subject.
+The only required fields are issuer and subject. In the future it will
+be possible to specify other properties of the generated certificate
+(for example, its validity period, signature algorithm, etc.). For now,
+those fields have reasonable default values. Currently one shared RSA
+key is used for all signatures.
 """
 
 from pyasn1.codec.der import decoder
@@ -68,7 +64,7 @@ def stringToAlgorithmIdentifier(string):
     algorithm = None
     if string == "sha256WithRSAEncryption":
         algorithm = univ.ObjectIdentifier('1.2.840.113549.1.1.11')
-    # do more of these...
+    # In the future, more algorithms will be supported.
     if algorithm == None:
         raise Exception("unknown signature type '%s'" % string)
     algorithmIdentifier.setComponentByName('algorithm', algorithm)
@@ -76,7 +72,9 @@ def stringToAlgorithmIdentifier(string):
 
 def stringToCommonName(string):
     """Helper function for taking a string and building an x520 name
-    representation usable by the pyasn1 package"""
+    representation usable by the pyasn1 package. Currently returns one
+    RDN with one AVA consisting of a Common Name encoded as a
+    UTF8String."""
     commonName = rfc2459.X520CommonName()
     commonName.setComponentByName('utf8String', string)
     ava = rfc2459.AttributeTypeAndValue()
@@ -148,7 +146,6 @@ class Certificate:
         "8d8127ef8fa09098b69147de065573447e183d22fe7d885aceb513d9581d"
         "d5e07c1a90f5ce0879de131371ecefc9ce72e9c43dc127d238190de81177"
         "3ca5d19301f48c742b", 16)
-
     sharedRSA_Q = long(
         "00d7a773d9ebc380a767d2fec0934ad4e8b5667240771acdebb5ad796f47"
         "8fec4d45985efbc9532968289c8d89102fadf21f34e2dd4940eba8c09d6d"
@@ -156,15 +153,14 @@ class Certificate:
         "28ef4ae3b95b92f2070af26c9e7c5c9b587fedde05e8e7d86ca57886fb16"
         "5810a77b9845bc3127", 16)
 
-
     def __init__(self, paramStream):
         self.serialNumber = sufficientlyUniqueSerialNumber()
         self.version = "v3"
         self.signature = "sha256WithRSAEncryption"
         self.issuer = "Default Issuer"
-        oneDay = datetime.timedelta(days=1)
-        self.notBefore = datetime.datetime.utcnow() - oneDay
-        self.notAfter = datetime.datetime.utcnow() + oneDay
+        oneYear = datetime.timedelta(days=365)
+        self.notBefore = datetime.datetime.utcnow() - oneYear
+        self.notAfter = datetime.datetime.utcnow() + oneYear
         self.subject = "Default Subject"
         self.signatureAlgorithm = "sha256WithRSAEncryption"
         self.extensions = None
@@ -282,7 +278,7 @@ class Certificate:
         algorithmIdentifier.setComponentByName('algorithm', rfc2459.rsaEncryption)
         algorithmIdentifier.setComponentByName('parameters', univ.Null())
         spki = rfc2459.SubjectPublicKeyInfo()
-        spki.setComponentByName('algorithm', algorithmIdentifier) # params?
+        spki.setComponentByName('algorithm', algorithmIdentifier)
         spki.setComponentByName('subjectPublicKey', self.getSubjectPublicKey())
         return spki
 
@@ -306,7 +302,7 @@ class Certificate:
         tbsDER = encoder.encode(tbsCertificate)
         rsaPrivateKey = rsa.PrivateKey(self.sharedRSA_N, self.sharedRSA_E, self.sharedRSA_D,
                                        self.sharedRSA_P, self.sharedRSA_Q)
-        signature = rsa.sign(tbsDER, rsaPrivateKey, 'SHA-256') # XXX
+        signature = rsa.sign(tbsDER, rsaPrivateKey, 'SHA-256')
         certificate = rfc2459.Certificate()
         certificate.setComponentByName('tbsCertificate', tbsCertificate)
         certificate.setComponentByName('signatureAlgorithm', self.getSignatureAlgorithm())
@@ -323,9 +319,14 @@ class Certificate:
         output += "\n-----END CERTIFICATE-----"
         return output
 
+# The build harness will call this function with an output file-like
+# object and an input path containing a specification. This will read
+# the specification and output the certificate as raw DER.
 def main(output, inputPath):
     with open(inputPath) as f:
         output.write(Certificate(f).toDER())
 
+# When run as a standalone program, this will read a specification from
+# stdin and output the certificate as PEM to stdout.
 if __name__ == "__main__":
     print Certificate(sys.stdin).toPEM()
