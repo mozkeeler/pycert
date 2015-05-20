@@ -30,9 +30,6 @@ Most fields have a default value. The only required fields are issuer and
 subject.
 """
 
-from Crypto.Hash import SHA256
-from Crypto.PublicKey import RSA
-from Crypto.Signature import PKCS1_v1_5
 from pyasn1.codec.der import decoder
 from pyasn1.codec.der import encoder
 from pyasn1.type import constraint, namedtype, tag, univ, useful
@@ -41,6 +38,7 @@ import base64
 import datetime
 import random
 import sys
+import rsa
 
 def sufficientlyUniqueSerialNumber():
     """Returns an ASN.1 DER-encoded INTEGER consisting of 20
@@ -144,6 +142,20 @@ class Certificate:
         "6cb9b5ebe64302041c78d908206b87009cb8cabacad3dbdb2792fb911b2c"
         "f4db6603585be9ae0ca3b8e6417aa04b06e470ea1a3b581ca03a6781c931"
         "5b62b30e6011f224725946eec57c6d9441", 16)
+    sharedRSA_P = long(
+        "00dd6e1d4fffebf68d889c4d114cdaaa9caa63a59374286c8a5c29a717bb"
+        "a60375644d5caa674c4b8bc7326358646220e4550d7608ac27d55b6db74f"
+        "8d8127ef8fa09098b69147de065573447e183d22fe7d885aceb513d9581d"
+        "d5e07c1a90f5ce0879de131371ecefc9ce72e9c43dc127d238190de81177"
+        "3ca5d19301f48c742b", 16)
+
+    sharedRSA_Q = long(
+        "00d7a773d9ebc380a767d2fec0934ad4e8b5667240771acdebb5ad796f47"
+        "8fec4d45985efbc9532968289c8d89102fadf21f34e2dd4940eba8c09d6d"
+        "1f16dcc29729774c43275e9251ddbe4909e1fd3bf1e4bedf46a39b8b3833"
+        "28ef4ae3b95b92f2070af26c9e7c5c9b587fedde05e8e7d86ca57886fb16"
+        "5810a77b9845bc3127", 16)
+
 
     def __init__(self, paramStream):
         self.serialNumber = sufficientlyUniqueSerialNumber()
@@ -291,10 +303,9 @@ class Certificate:
                 count += 1
             tbsCertificate.setComponentByName('extensions', extensions)
         tbsDER = encoder.encode(tbsCertificate)
-        rsaKey = RSA.construct((self.sharedRSA_N, self.sharedRSA_E, self.sharedRSA_D))
-        h = SHA256.new(tbsDER)
-        signer = PKCS1_v1_5.new(rsaKey)
-        signature = signer.sign(h)
+        rsaPrivateKey = rsa.PrivateKey(self.sharedRSA_N, self.sharedRSA_E, self.sharedRSA_D,
+                                       self.sharedRSA_P, self.sharedRSA_Q)
+        signature = rsa.sign(tbsDER, rsaPrivateKey, 'SHA-256') # XXX
         certificate = rfc2459.Certificate()
         certificate.setComponentByName('tbsCertificate', tbsCertificate)
         certificate.setComponentByName('signatureAlgorithm', self.getSignatureAlgorithm())
@@ -311,6 +322,9 @@ class Certificate:
         output += "\n-----END CERTIFICATE-----"
         return output
 
+def main(output, inputPath):
+    with open(inputPath) as f:
+        output.write(Certificate(f).toDER())
 
 if __name__ == "__main__":
     print Certificate(sys.stdin).toPEM()
