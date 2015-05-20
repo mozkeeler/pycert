@@ -280,6 +280,7 @@ class Certificate:
     def getSubjectPublicKeyInfo(self):
         algorithmIdentifier = rfc2459.AlgorithmIdentifier()
         algorithmIdentifier.setComponentByName('algorithm', rfc2459.rsaEncryption)
+        algorithmIdentifier.setComponentByName('parameters', univ.Null())
         spki = rfc2459.SubjectPublicKeyInfo()
         spki.setComponentByName('algorithm', algorithmIdentifier) # params?
         spki.setComponentByName('subjectPublicKey', self.getSubjectPublicKey())
