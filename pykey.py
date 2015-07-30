@@ -29,6 +29,8 @@ In the future it will be possible to specify other properties of the key
 from pyasn1.codec.der import encoder
 from pyasn1.type import univ, namedtype
 from pyasn1_modules import rfc2459
+from ecc import encoding
+from ecc import Key
 import base64
 import binascii
 import rsa
@@ -78,6 +80,14 @@ class RSAPrivateKey(univ.Sequence):
         namedtype.NamedType('exponent1', univ.Integer()),
         namedtype.NamedType('exponent2', univ.Integer()),
         namedtype.NamedType('coefficient', univ.Integer()),
+    )
+
+
+class ECPoint(univ.Sequence):
+    """Helper type for encoding a EC point"""
+    componentType = namedtype.NamedTypes(
+        namedtype.NamedType('x', univ.Integer()),
+        namedtype.NamedType('y', univ.Integer())
     )
 
 
@@ -460,6 +470,60 @@ class RSAKey:
         signature = rsa.sign(data, rsaPrivateKey, 'SHA-256')
         return byteStringToHexifiedBitString(signature)
 
+
+ecPublicKey = univ.ObjectIdentifier('1.2.840.10045.2.1')
+secp256r1 = univ.ObjectIdentifier('1.2.840.10045.3.1.7')
+
+class ECCKey:
+    secp256r1Encoded = str('cb872ac99cd31827010000404fbfbbbb61e0f8f9b1'
+        'a60a59ac8704e2ec050b423e3cf72e923f2c4f794b455c2a69d233456c36c'
+        '4119d0706e00eedc8d19390d7991b7b2d07a304eaa04aa6c000202191403d'
+        '5710bf15a265818cd42ed6fedf09add92d78b18e7a1e9feb95524702')
+
+    def __init__(self, specification = None):
+        self.key = Key.Key.decode(binascii.unhexlify(self.secp256r1Encoded))
+
+    def asSubjectPublicKeyInfo(self):
+        """Returns a subject public key info representing
+        this key for use by pyasn1."""
+        algorithmIdentifier = rfc2459.AlgorithmIdentifier()
+        algorithmIdentifier.setComponentByName('algorithm', ecPublicKey)
+        algorithmIdentifier.setComponentByName('parameters', secp256r1)
+        spki = rfc2459.SubjectPublicKeyInfo()
+        spki.setComponentByName('algorithm', algorithmIdentifier)
+        encoded = self.key.encode()
+        # The encoding of the key is an 8-byte id, followed by 2 bytes
+        # for the key length in bits, followed by the point on the curve
+        # (represented by two longs). There appear to be 2 bytes
+        # indicating the length of the point as encoded, but Decoder
+        # takes care of that.
+        _, _, points = encoding.Decoder(encoded).int(8).int(2).point(2).out()
+        # '04' indicates that the points are in uncompressed form.
+        hexifiedBitString = "'%s%s%s'H" % ('04', hex(points[0])[2:-1], hex(points[1])[2:-1])
+        subjectPublicKey = univ.BitString(hexifiedBitString)
+        spki.setComponentByName('subjectPublicKey', subjectPublicKey)
+        return spki
+
+    def sign(self, data):
+        """Returns a hexified bit string representing a
+        signature by this key over the specified data.
+        Intended for use with pyasn1.type.univ.BitString"""
+        # For some reason Key.sign returns an encoded point.
+        # Decode it so we can encode it as a BITSTRING consisting of a
+        # SEQUENCE of two INTEGERs.
+        x, y = encoding.dec_point(self.key.sign(data, 'sha256'))
+        point = ECPoint()
+        point.setComponentByName('x', x)
+        point.setComponentByName('y', y)
+        return byteStringToHexifiedBitString(encoder.encode(point))
+
+
+def keyFromSpecification(specification = None):
+    """Pass in a specification, get the appropriate key back."""
+    if specification == 'secp256r1':
+        return ECCKey()
+    else:
+        return RSAKey(specification)
 
 # The build harness will call this function with an output file-like
 # object and a path to a file containing a specification. This will

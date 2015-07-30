@@ -13,6 +13,7 @@ The input format is as follows:
 issuer:<string to use as the issuer common name>
 subject:<string to use as the subject common name>
 [version:<{1,2,3,4}>]
+[signatureAlgorithm:sha256WithRSAEncryption|ecdsaWithSHA256]
 [validity:<YYYYMMDD-YYYYMMDD|duration in days>]
 [issuerKey:alternate]
 [subjectKey:alternate]
@@ -149,8 +150,9 @@ def stringToAlgorithmIdentifier(string):
     algorithm = None
     if string == 'sha256WithRSAEncryption':
         algorithm = univ.ObjectIdentifier('1.2.840.113549.1.1.11')
-    # In the future, more algorithms will be supported.
-    if algorithm == None:
+    elif string == 'ecdsaWithSHA256':
+        algorithm = univ.ObjectIdentifier('1.2.840.10045.4.3.2')
+    else:
         raise UnknownAlgorithmTypeError(string)
     algorithmIdentifier.setComponentByName('algorithm', algorithm)
     return algorithmIdentifier
@@ -199,8 +201,8 @@ class Certificate:
         self.subject = 'Default Subject'
         self.signatureAlgorithm = 'sha256WithRSAEncryption'
         self.extensions = None
-        self.subjectKey = pykey.RSAKey()
-        self.issuerKey = pykey.RSAKey()
+        self.subjectKey = pykey.keyFromSpecification()
+        self.issuerKey = pykey.keyFromSpecification()
         self.decodeParams(paramStream)
         self.serialNumber = self.generateSerialNumber()
 
@@ -243,6 +245,8 @@ class Certificate:
         value = ':'.join(line.split(':')[1:])
         if param == 'version':
             self.setVersion(value)
+        elif param == 'signatureAlgorithm':
+            self.signature = value
         elif param == 'subject':
             self.subject = value
         elif param == 'issuer':
@@ -295,9 +299,9 @@ class Certificate:
 
     def setupKey(self, subjectOrIssuer, value):
         if subjectOrIssuer == 'subject':
-            self.subjectKey = pykey.RSAKey(value)
+            self.subjectKey = pykey.keyFromSpecification(value)
         elif subjectOrIssuer == 'issuer':
-            self.issuerKey = pykey.RSAKey(value)
+            self.issuerKey = pykey.keyFromSpecification(value)
         else:
             raise UnknownKeyTargetError(subjectOrIssuer)
 
