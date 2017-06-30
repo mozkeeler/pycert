@@ -18,6 +18,7 @@ subject:<subject distinguished name specification>
 [subjectKey:<key specification>]
 [signature:{sha256WithRSAEncryption,sha1WithRSAEncryption,
             md5WithRSAEncryption,ecdsaWithSHA256}]
+[serialNumber:<integer in the interval [1, 127]>]
 [extension:<extension name:<extension-specific data>>]
 [...]
 
@@ -28,11 +29,13 @@ keyUsage:[digitalSignature,nonRepudiation,keyEncipherment,
 extKeyUsage:[serverAuth,clientAuth,codeSigning,emailProtection
              nsSGC, # Netscape Server Gated Crypto
              OCSPSigning,timeStamping]
-subjectAlternativeName:[<dNSName>,...]
+subjectAlternativeName:[<dNSName|directoryName>,...]
 authorityInformationAccess:<OCSP URI>
-certificatePolicies:<policy OID>
+certificatePolicies:[<policy OID>,...]
 nameConstraints:{permitted,excluded}:[<dNSName|directoryName>,...]
 nsCertType:sslServer
+TLSFeature:[<TLSFeature>,...]
+embeddedSCTList:[<key specification>:<YYYYMMDD>,...]
 
 Where:
   [] indicates an optional field or component of a field
@@ -63,24 +66,34 @@ Issuer and subject distinguished name specifications are of the form
 (organizational unit name), CN (common name) and emailAddress (email
 address) are currently supported. The optional stringEncoding field may
 be 'utf8String' or 'printableString'. If the given string does not
-contain a '/', it is assumed to represent a common name.
+contain a '/', it is assumed to represent a common name. If an empty
+string is provided, then an empty distinguished name is returned.
 DirectoryNames also use this format. When specifying a directoryName in
 a nameConstraints extension, the implicit form may not be used.
 
 If an extension name has '[critical]' after it, it will be marked as
 critical. Otherwise (by default), it will not be marked as critical.
+
+TLSFeature values can either consist of a named value (currently only
+'OCSPMustStaple' which corresponds to status_request) or a numeric TLS
+feature value (see rfc7633 for more information).
+
+If a serial number is not explicitly specified, it is automatically
+generated based on the contents of the certificate.
 """
 
 from pyasn1.codec.der import decoder
 from pyasn1.codec.der import encoder
 from pyasn1.type import constraint, namedtype, tag, univ, useful
 from pyasn1_modules import rfc2459
+from struct import pack
 import base64
 import datetime
 import hashlib
 import re
 import sys
 
+import pyct
 import pykey
 
 # The GeneralSubtree definition in pyasn1_modules.rfc2459 is incorrect.
@@ -108,7 +121,12 @@ class NameConstraints(univ.Sequence):
     )
 
 
-class UnknownBaseError(Exception):
+class Error(Exception):
+    """Base class for exceptions in this module."""
+    pass
+
+
+class UnknownBaseError(Error):
     """Base class for handling unexpected input in this module."""
     def __init__(self, value):
         super(UnknownBaseError, self).__init__()
@@ -192,6 +210,36 @@ class UnknownNSCertTypeError(UnknownBaseError):
         self.category = 'nsCertType'
 
 
+class UnknownTLSFeature(UnknownBaseError):
+    """Helper exception type to handle unknown TLS Features."""
+
+    def __init__(self, value):
+        UnknownBaseError.__init__(self, value)
+        self.category = 'TLSFeature'
+
+
+class InvalidSCTSpecification(Error):
+    """Helper exception type to handle invalid SCT specifications."""
+
+    def __init__(self, value):
+        super(InvalidSCTSpecification, self).__init__()
+        self.value = value
+
+    def __str__(self):
+        return repr('invalid SCT specification "{}"' % self.value)
+
+
+class InvalidSerialNumber(Error):
+    """Exception type to handle invalid serial numbers."""
+
+    def __init__(self, value):
+        super(InvalidSerialNumber, self).__init__()
+        self.value = value
+
+    def __str__(self):
+        return repr(self.value)
+
+
 def getASN1Tag(asn1Type):
     """Helper function for returning the base tag value of a given
     type from the pyasn1 package"""
@@ -215,7 +263,7 @@ def stringToDN(string, tag=None):
     for the issuer and subject fields for more details. Takes an
     optional implicit tag in cases where the Name needs to be tagged
     differently."""
-    if '/' not in string:
+    if string and '/' not in string:
         string = '/CN=%s' % string
     rdns = rfc2459.RDNSequence()
     pattern = '/(C|ST|L|O|OU|CN|emailAddress)='
@@ -269,26 +317,26 @@ def stringToDN(string, tag=None):
 def stringToAlgorithmIdentifiers(string):
     """Helper function that converts a description of an algorithm
     to a representation usable by the pyasn1 package and a hash
-    algorithm name for use by pykey."""
+    algorithm constant for use by pykey."""
     algorithmIdentifier = rfc2459.AlgorithmIdentifier()
-    algorithmName = None
+    algorithmType = None
     algorithm = None
     if string == 'sha1WithRSAEncryption':
-        algorithmName = 'SHA-1'
+        algorithmType = pykey.HASH_SHA1
         algorithm = rfc2459.sha1WithRSAEncryption
     elif string == 'sha256WithRSAEncryption':
-        algorithmName = 'SHA-256'
+        algorithmType = pykey.HASH_SHA256
         algorithm = univ.ObjectIdentifier('1.2.840.113549.1.1.11')
     elif string == 'md5WithRSAEncryption':
-        algorithmName = 'MD5'
+        algorithmType = pykey.HASH_MD5
         algorithm = rfc2459.md5WithRSAEncryption
     elif string == 'ecdsaWithSHA256':
-        algorithmName = 'sha256'
+        algorithmType = pykey.HASH_SHA256
         algorithm = univ.ObjectIdentifier('1.2.840.10045.4.3.2')
     else:
         raise UnknownAlgorithmTypeError(string)
     algorithmIdentifier.setComponentByName('algorithm', algorithm)
-    return (algorithmIdentifier, algorithmName)
+    return (algorithmIdentifier, algorithmType)
 
 def datetimeToTime(dt):
     """Takes a datetime object and returns an rfc2459.Time object with
@@ -296,6 +344,16 @@ def datetimeToTime(dt):
     time = rfc2459.Time()
     time.setComponentByName('generalTime', useful.GeneralizedTime(dt.strftime('%Y%m%d%H%M%SZ')))
     return time
+
+def serialBytesToString(serialBytes):
+    """Takes a list of integers in the interval [0, 255] and returns
+    the corresponding serial number string."""
+    serialBytesLen = len(serialBytes)
+    if serialBytesLen > 127:
+        raise InvalidSerialNumber("{} bytes is too long".format(serialBytesLen))
+    # Prepend the ASN.1 INTEGER tag and length bytes.
+    stringBytes = [getASN1Tag(univ.Integer), serialBytesLen] + serialBytes
+    return ''.join(chr(b) for b in stringBytes)
 
 class Certificate(object):
     """Utility class for reading a certificate specification and
@@ -307,15 +365,24 @@ class Certificate(object):
         self.issuer = 'Default Issuer'
         actualNow = datetime.datetime.utcnow()
         self.now = datetime.datetime.strptime(str(actualNow.year), '%Y')
-        aYearAndAWhile = datetime.timedelta(days=550)
+        aYearAndAWhile = datetime.timedelta(days=400)
         self.notBefore = self.now - aYearAndAWhile
         self.notAfter = self.now + aYearAndAWhile
         self.subject = 'Default Subject'
         self.extensions = None
+        self.savedEmbeddedSCTListData = None
         self.subjectKey = pykey.keyFromSpecification('default')
         self.issuerKey = pykey.keyFromSpecification('default')
+        self.serialNumber = None
         self.decodeParams(paramStream)
-        self.serialNumber = self.generateSerialNumber()
+        # If a serial number wasn't specified, generate one based on
+        # the certificate contents.
+        if not self.serialNumber:
+            self.serialNumber = self.generateSerialNumber()
+        # This has to be last because the SCT signature depends on the
+        # contents of the certificate.
+        if self.savedEmbeddedSCTListData:
+            self.addEmbeddedSCTListData()
 
     def generateSerialNumber(self):
         """Generates a serial number for this certificate based on its
@@ -329,13 +396,16 @@ class Certificate(object):
         hasher.update(str(self.notBefore))
         hasher.update(str(self.notAfter))
         hasher.update(self.subject)
-        # Bug 1194419: This is duplicated so as to not have to
-        # re-generate the EV testing root certificates. At some point
-        # we should clean this up and re-generate them.
-        hasher.update(self.signature)
         if self.extensions:
             for extension in self.extensions:
                 hasher.update(str(extension))
+        if self.savedEmbeddedSCTListData:
+            # savedEmbeddedSCTListData is
+            # (embeddedSCTListSpecification, critical), where |critical|
+            # may be None
+            hasher.update(self.savedEmbeddedSCTListData[0])
+            if (self.savedEmbeddedSCTListData[1]):
+                hasher.update(self.savedEmbeddedSCTListData[1])
         serialBytes = [ord(c) for c in hasher.digest()[:20]]
         # Ensure that the most significant bit isn't set (which would
         # indicate a negative number, which isn't valid for serial
@@ -345,10 +415,7 @@ class Certificate(object):
         # significant byte is set (to prevent a leading zero byte,
         # which also wouldn't be valid).
         serialBytes[0] |= 0x01
-        # Now prepend the ASN.1 INTEGER tag and length bytes.
-        serialBytes.insert(0, len(serialBytes))
-        serialBytes.insert(0, getASN1Tag(univ.Integer))
-        return ''.join(chr(b) for b in serialBytes)
+        return serialBytesToString(serialBytes)
 
     def decodeParams(self, paramStream):
         for line in paramStream.readlines():
@@ -373,6 +440,13 @@ class Certificate(object):
             self.setupKey('subject', value)
         elif param == 'signature':
             self.signature = value
+        elif param == 'serialNumber':
+            serialNumber = int(value)
+            # Ensure only serial numbers that conform to the rules listed in
+            # generateSerialNumber() are permitted.
+            if serialNumber < 1 or serialNumber > 127:
+                raise InvalidSerialNumber(value)
+            self.serialNumber = serialBytesToString([serialNumber])
         else:
             raise UnknownParameterTypeError(param)
 
@@ -416,6 +490,10 @@ class Certificate(object):
             self.addNameConstraints(value, critical)
         elif extensionType == 'nsCertType':
             self.addNSCertType(value, critical)
+        elif extensionType == 'TLSFeature':
+            self.addTLSFeature(value, critical)
+        elif extensionType == 'embeddedSCTList':
+            self.savedEmbeddedSCTListData = (value, critical)
         else:
             raise UnknownExtensionTypeError(extensionType)
 
@@ -482,14 +560,19 @@ class Certificate(object):
             extKeyUsageExtension.setComponentByPosition(count, self.keyPurposeToOID(keyPurpose))
         self.addExtension(rfc2459.id_ce_extKeyUsage, extKeyUsageExtension, critical)
 
-    def addSubjectAlternativeName(self, dNSNames, critical):
+    def addSubjectAlternativeName(self, names, critical):
         subjectAlternativeName = rfc2459.SubjectAltName()
-        for count, dNSName in enumerate(dNSNames.split(',')):
+        for count, name in enumerate(names.split(',')):
             generalName = rfc2459.GeneralName()
-            # The string may have things like '\0' (i.e. a slash
-            # followed by the number zero) that have to be decoded into
-            # the resulting '\x00' (i.e. a byte with value zero).
-            generalName.setComponentByName('dNSName', dNSName.decode(encoding='string_escape'))
+            if '/' in name:
+                directoryName = stringToDN(name,
+                                           tag.Tag(tag.tagClassContext, tag.tagFormatSimple, 4))
+                generalName.setComponentByName('directoryName', directoryName)
+            else:
+                # The string may have things like '\0' (i.e. a slash
+                # followed by the number zero) that have to be decoded into
+                # the resulting '\x00' (i.e. a byte with value zero).
+                generalName.setComponentByName('dNSName', name.decode(encoding='string_escape'))
             subjectAlternativeName.setComponentByPosition(count, generalName)
         self.addExtension(rfc2459.id_ce_subjectAltName, subjectAlternativeName, critical)
 
@@ -499,14 +582,15 @@ class Certificate(object):
         sequence.setComponentByPosition(0, accessDescription)
         self.addExtension(rfc2459.id_pe_authorityInfoAccess, sequence, critical)
 
-    def addCertificatePolicies(self, policyOID, critical):
+    def addCertificatePolicies(self, policyOIDs, critical):
         policies = rfc2459.CertificatePolicies()
-        policy = rfc2459.PolicyInformation()
-        if policyOID == 'any':
-            policyOID = '2.5.29.32.0'
-        policyIdentifier = rfc2459.CertPolicyId(policyOID)
-        policy.setComponentByName('policyIdentifier', policyIdentifier)
-        policies.setComponentByPosition(0, policy)
+        for pos, policyOID in enumerate(policyOIDs.split(',')):
+            if policyOID == 'any':
+                policyOID = '2.5.29.32.0'
+            policy = rfc2459.PolicyInformation()
+            policyIdentifier = rfc2459.CertPolicyId(policyOID)
+            policy.setComponentByName('policyIdentifier', policyIdentifier)
+            policies.setComponentByPosition(pos, policy)
         self.addExtension(rfc2459.id_ce_certificatePolicies, policies, critical)
 
     def addNameConstraints(self, constraints, critical):
@@ -540,6 +624,46 @@ class Certificate(object):
         self.addExtension(univ.ObjectIdentifier('2.16.840.1.113730.1.1'), univ.BitString("'01'B"),
                           critical)
 
+    def addTLSFeature(self, features, critical):
+        namedFeatures = {'OCSPMustStaple': 5}
+        featureList = [f.strip() for f in features.split(',')]
+        sequence = univ.Sequence()
+        for feature in featureList:
+            featureValue = 0
+            try:
+                featureValue = int(feature)
+            except ValueError:
+                try:
+                    featureValue = namedFeatures[feature]
+                except:
+                    raise UnknownTLSFeature(feature)
+            sequence.setComponentByPosition(len(sequence),
+                                            univ.Integer(featureValue))
+        self.addExtension(univ.ObjectIdentifier('1.3.6.1.5.5.7.1.24'), sequence,
+                          critical)
+
+    def addEmbeddedSCTListData(self):
+        (scts, critical) = self.savedEmbeddedSCTListData
+        encodedSCTs = []
+        for sctSpec in scts.split(','):
+            match = re.search('(\w+):(\d{8})', sctSpec)
+            if not match:
+                raise InvalidSCTSpecification(sctSpec)
+            keySpec = match.group(1)
+            key = pykey.keyFromSpecification(keySpec)
+            time = datetime.datetime.strptime(match.group(2), '%Y%m%d')
+            tbsCertificate = self.getTBSCertificate()
+            tbsDER = encoder.encode(tbsCertificate)
+            sct = pyct.SCT(key, time, tbsDER, self.issuerKey)
+            signed = sct.signAndEncode()
+            lengthPrefix = pack('!H', len(signed))
+            encodedSCTs.append(lengthPrefix + signed)
+        encodedSCTBytes = "".join(encodedSCTs)
+        lengthPrefix = pack('!H', len(encodedSCTBytes))
+        extensionBytes = lengthPrefix + encodedSCTBytes
+        self.addExtension(univ.ObjectIdentifier('1.3.6.1.4.1.11129.2.4.2'),
+                          univ.OctetString(extensionBytes), critical)
+
     def getVersion(self):
         return rfc2459.Version(self.versionValue).subtype(
             explicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatSimple, 0))
@@ -565,8 +689,8 @@ class Certificate(object):
     def getSubject(self):
         return stringToDN(self.subject)
 
-    def toDER(self):
-        (signatureOID, hashName) = stringToAlgorithmIdentifiers(self.signature)
+    def getTBSCertificate(self):
+        (signatureOID, _) = stringToAlgorithmIdentifiers(self.signature)
         tbsCertificate = rfc2459.TBSCertificate()
         tbsCertificate.setComponentByName('version', self.getVersion())
         tbsCertificate.setComponentByName('serialNumber', self.getSerialNumber())
@@ -582,11 +706,16 @@ class Certificate(object):
             for count, extension in enumerate(self.extensions):
                 extensions.setComponentByPosition(count, extension)
             tbsCertificate.setComponentByName('extensions', extensions)
+        return tbsCertificate
+
+    def toDER(self):
+        (signatureOID, hashAlgorithm) = stringToAlgorithmIdentifiers(self.signature)
         certificate = rfc2459.Certificate()
+        tbsCertificate = self.getTBSCertificate()
         certificate.setComponentByName('tbsCertificate', tbsCertificate)
         certificate.setComponentByName('signatureAlgorithm', signatureOID)
         tbsDER = encoder.encode(tbsCertificate)
-        certificate.setComponentByName('signatureValue', self.issuerKey.sign(tbsDER, hashName))
+        certificate.setComponentByName('signatureValue', self.issuerKey.sign(tbsDER, hashAlgorithm))
         return encoder.encode(certificate)
 
     def toPEM(self):
@@ -616,9 +745,7 @@ class Certificate(object):
 def main(output, inputPath):
     with open(inputPath) as configStream:
         output.write(Certificate(configStream).toPEM())
-    # Force updating the output file even if the content does not change
-    # so that we won't be called again simply because of the mtime.
-    output.force_update = True
+
 
 # When run as a standalone program, this will read a specification from
 # stdin and output the certificate as PEM to stdout.
